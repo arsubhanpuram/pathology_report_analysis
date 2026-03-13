@@ -129,7 +129,7 @@ FRONTIER_MODELS = {
 }
 
 # Set a safer default model for deployment
-DEFAULT_MODEL = "llama-3.3-70b-instruct"
+DEFAULT_MODEL = "claude-4.5-sonnet"
 if DEFAULT_MODEL not in NAVIGATOR_MODELS:
     DEFAULT_MODEL = NAVIGATOR_MODELS[0]
 
