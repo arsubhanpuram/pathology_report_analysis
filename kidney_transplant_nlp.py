@@ -1,11 +1,17 @@
+import os
+import json
+import re
+
 import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
-import os
 
+# Load local .env for local development
 load_dotenv()
-import json
-import re
+
+# Prefer Streamlit secrets in deployment, fall back to local .env
+API_KEY = st.secrets.get("NAVIGATOR_API_KEY", os.getenv("NAVIGATOR_API_KEY"))
+BASE_URL = st.secrets.get("BASE_URL", os.getenv("BASE_URL", "https://api.ai.it.ufl.edu"))
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -98,7 +104,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
 # ── Model registry ───────────────────────────────────────────────────────────
 NAVIGATOR_MODELS = [
     # Frontier models (require elevated access)
@@ -122,6 +127,11 @@ FRONTIER_MODELS = {
     "gemini-3.0-pro", "gpt-5.2", "gpt-5.1", "gpt-5",
     "gemini-2.5-pro", "claude-4.5-sonnet",
 }
+
+# Set a safer default model for deployment
+DEFAULT_MODEL = "llama-3.3-70b-instruct"
+if DEFAULT_MODEL not in NAVIGATOR_MODELS:
+    DEFAULT_MODEL = NAVIGATOR_MODELS[0]
 
 # ── Default system prompt ─────────────────────────────────────────────────────
 DEFAULT_SYSTEM = """You are a clinical NLP model specialized in kidney transplant pathology. 
@@ -153,13 +163,12 @@ Rules:
 - Default all fields when transplant_confirmed is false
 - Return ONLY the JSON object. Nothing else."""
 
-
 # ── Docs section ──────────────────────────────────────────────────────────────
 def render_docs():
     with st.expander("📖  Documentation — How to use this app & JSON Schema Reference", expanded=False):
         st.markdown("## How to Use This App")
         st.markdown("""
-This application uses Claude (Anthropic) to extract structured clinical information from **kidney transplant pathology reports**.
+This application uses a selected model to extract structured clinical information from **kidney transplant pathology reports**.
 
 **Steps:**
 1. *(Optional)* Edit the **System Prompt** in the sidebar to customise the model's behaviour.
@@ -193,18 +202,23 @@ This application uses Claude (Anthropic) to extract structured clinical informat
         ]
 
         col_k, col_t, col_d = st.columns([2, 1.2, 4])
-        col_k.markdown("**Key**"); col_t.markdown("**Type**"); col_d.markdown("**Values / Meaning**")
+        col_k.markdown("**Key**")
+        col_t.markdown("**Type**")
+        col_d.markdown("**Values / Meaning**")
         st.markdown("---")
+
         for key, typ, desc in schema_rows:
             c1, c2, c3 = st.columns([2, 1.2, 4])
             c1.code(key)
             c2.write(typ)
             c3.markdown(desc)
 
-
 # ── Sidebar — System prompt ───────────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/3b/Antu_urology.svg/240px-Antu_urology.svg.png", width=60)
+    st.image(
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3b/Antu_urology.svg/240px-Antu_urology.svg.png",
+        width=60
+    )
     st.title("⚙️ Configuration")
     st.markdown("**System Prompt**")
     system_prompt = st.text_area(
@@ -221,7 +235,7 @@ with st.sidebar:
     selected_model = st.selectbox(
         label="model_selector",
         options=NAVIGATOR_MODELS,
-        index=NAVIGATOR_MODELS.index("claude-4.5-sonnet"),
+        index=NAVIGATOR_MODELS.index(DEFAULT_MODEL),
         label_visibility="collapsed",
         help="Select the model to run analysis with.",
     )
@@ -229,7 +243,6 @@ with st.sidebar:
         st.caption("⚡ Frontier model — requires elevated API access.")
     else:
         st.caption("✅ Open-source model — generally available.")
-
 
 # ── Main area ─────────────────────────────────────────────────────────────────
 st.title("🫘 Kidney Transplant NLP Analyser")
@@ -253,21 +266,46 @@ with col_model:
     )
 
 # ── Helper renderers ──────────────────────────────────────────────────────────
-
 def bool_badge(val: bool) -> str:
     cls = "badge-true" if val else "badge-false"
     label = "✓ Yes" if val else "✗ No"
     return f'<span class="badge {cls}">{label}</span>'
 
 def certainty_badge(val: str) -> str:
-    cls = f"badge-{val}" if val in ("definite","probable","possible","none") else "badge-none"
+    cls = f"badge-{val}" if val in ("definite", "probable", "possible", "none") else "badge-none"
     return f'<span class="badge {cls}">{val.capitalize()}</span>'
 
 def field(label: str, value) -> str:
     return f'<div class="field-label">{label}</div><div class="field-value">{value}</div>'
 
+def normalize_output(data: dict) -> dict:
+    expected = {
+        "transplant_confirmed": False,
+        "transplant_type": "none",
+        "donor_type": "none",
+        "evidence_of_rejection": False,
+        "rejection_type": "none",
+        "evidence_of_graft_failure": False,
+        "graft_failure_type": "none",
+        "evidence_of_graft_complication": False,
+        "complication_type": "none",
+        "certainty": "none",
+        "temporal_status": "unclear",
+        "human_review": False,
+        "human_review_reason": None,
+    }
+
+    if not isinstance(data, dict):
+        return expected
+
+    normalized = expected.copy()
+    for key in expected:
+        if key in data:
+            normalized[key] = data[key]
+
+    return normalized
+
 def render_result(data: dict):
-    # Human review banner
     if data.get("human_review"):
         reason = data.get("human_review_reason") or "Manual review required."
         st.markdown(f"""
@@ -279,7 +317,6 @@ def render_result(data: dict):
             </div>
         </div>""", unsafe_allow_html=True)
 
-    # ── Row 1: Transplant identity ─────────────────────────────────────────
     st.markdown('<div class="section-header">Transplant Identity</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -291,16 +328,15 @@ def render_result(data: dict):
     with c2:
         st.markdown(f"""
         <div class="result-card">
-            {field("Transplant Type", data.get("transplant_type","—").upper())}
+            {field("Transplant Type", str(data.get("transplant_type", "—")).upper())}
         </div>""", unsafe_allow_html=True)
     with c3:
-        donor = data.get("donor_type","—")
+        donor = str(data.get("donor_type", "—"))
         st.markdown(f"""
         <div class="result-card">
             {field("Donor Type", donor.capitalize())}
         </div>""", unsafe_allow_html=True)
 
-    # ── Row 2: Rejection ───────────────────────────────────────────────────
     st.markdown('<div class="section-header">Rejection</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     rej = data.get("evidence_of_rejection", False)
@@ -311,14 +347,13 @@ def render_result(data: dict):
             {field("Evidence of Rejection", bool_badge(rej))}
         </div>""", unsafe_allow_html=True)
     with c2:
-        rt = data.get("rejection_type","none")
+        rt = str(data.get("rejection_type", "none"))
         display = " &nbsp;|&nbsp; ".join([f"<code>{t.strip()}</code>" for t in rt.split("|")]) if rt != "none" else "—"
         st.markdown(f"""
         <div class="result-card">
             {field("Rejection Type", display)}
         </div>""", unsafe_allow_html=True)
 
-    # ── Row 3: Graft failure ───────────────────────────────────────────────
     st.markdown('<div class="section-header">Graft Failure</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     gf = data.get("evidence_of_graft_failure", False)
@@ -329,14 +364,13 @@ def render_result(data: dict):
             {field("Evidence of Graft Failure", bool_badge(gf))}
         </div>""", unsafe_allow_html=True)
     with c2:
-        gft = data.get("graft_failure_type","none")
+        gft = str(data.get("graft_failure_type", "none"))
         display = " &nbsp;|&nbsp; ".join([f"<code>{t.strip()}</code>" for t in gft.split("|")]) if gft != "none" else "—"
         st.markdown(f"""
         <div class="result-card">
             {field("Graft Failure Type", display)}
         </div>""", unsafe_allow_html=True)
 
-    # ── Row 4: Complications ───────────────────────────────────────────────
     st.markdown('<div class="section-header">Graft Complications</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     gc = data.get("evidence_of_graft_complication", False)
@@ -347,23 +381,22 @@ def render_result(data: dict):
             {field("Evidence of Complication", bool_badge(gc))}
         </div>""", unsafe_allow_html=True)
     with c2:
-        ct = data.get("complication_type","none")
+        ct = str(data.get("complication_type", "none"))
         display = " &nbsp;|&nbsp; ".join([f"<code>{t.strip()}</code>" for t in ct.split("|")]) if ct != "none" else "—"
         st.markdown(f"""
         <div class="result-card">
             {field("Complication Type(s)", display)}
         </div>""", unsafe_allow_html=True)
 
-    # ── Row 5: Classification metadata ────────────────────────────────────
     st.markdown('<div class="section-header">Classification Metadata</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(f"""
         <div class="result-card">
-            {field("Certainty", certainty_badge(data.get("certainty","none")))}
+            {field("Certainty", certainty_badge(str(data.get("certainty", "none"))))}
         </div>""", unsafe_allow_html=True)
     with c2:
-        ts = data.get("temporal_status","unclear")
+        ts = str(data.get("temporal_status", "unclear"))
         ts_icons = {
             "acute/current": "🔴",
             "chronic/ongoing": "🟡",
@@ -384,43 +417,50 @@ def render_result(data: dict):
             {field("Human Review", bool_badge(hr))}
         </div>""", unsafe_allow_html=True)
 
-    # ── Raw JSON toggle ────────────────────────────────────────────────────
     with st.expander("🔧 View raw JSON"):
         st.json(data)
-
 
 # ── Run analysis ──────────────────────────────────────────────────────────────
 if analyse_btn:
     if not user_prompt.strip():
         st.warning("Please enter a pathology report before clicking Analyse.")
     else:
+        if not API_KEY:
+            st.error("Missing NAVIGATOR_API_KEY. Add it to Streamlit Secrets or your local .env file.")
+            st.stop()
+
         with st.spinner(f"Analysing report with **{selected_model}**…"):
+            raw_text = ""
             try:
                 client = OpenAI(
-                    api_key=os.getenv("NAVIGATOR_API_KEY"),
-                    base_url="https://api.ai.it.ufl.edu",
+                    api_key=API_KEY,
+                    base_url=BASE_URL,
                 )
+
                 response = client.chat.completions.create(
                     model=selected_model,
-                    max_tokens=1000,
+                    #max_tokens=1000,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                 )
+
                 raw_text = response.choices[0].message.content.strip()
 
-                # Strip markdown code fences if present
                 raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
                 raw_text = re.sub(r"\s*```$", "", raw_text)
 
                 data = json.loads(raw_text)
+                data = normalize_output(data)
+
                 st.success("Analysis complete.")
                 st.markdown("---")
                 render_result(data)
 
             except json.JSONDecodeError as e:
                 st.error(f"Model returned invalid JSON: {e}")
-                st.code(raw_text, language="text")
+                if raw_text:
+                    st.code(raw_text, language="text")
             except Exception as e:
                 st.error(f"An error occurred: {e}")
