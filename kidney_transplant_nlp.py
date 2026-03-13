@@ -6,6 +6,8 @@ import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Load local .env for local development
 load_dotenv()
 
@@ -134,10 +136,11 @@ if DEFAULT_MODEL not in NAVIGATOR_MODELS:
     DEFAULT_MODEL = NAVIGATOR_MODELS[0]
 
 # ── Default system prompt ─────────────────────────────────────────────────────
-with open("system_prompt.md", "r") as f:
-    system_prompt = f.read().strip()
-
-DEFAULT_SYSTEM = system_prompt
+try:
+    with open(os.path.join(BASE_DIR, "system_prompt.md"), "r") as f:
+        DEFAULT_SYSTEM = f.read().strip()
+except FileNotFoundError:
+    DEFAULT_SYSTEM = "⚠️ system_prompt.md not found — place it next to app.py"
 
 # ── Docs section ──────────────────────────────────────────────────────────────
 def render_docs():
